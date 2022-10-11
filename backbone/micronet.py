@@ -3,9 +3,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import backbone.activation as activation
-import backbone.microconfig as microcfg
-
+import micronet.backbone.activation as activation
+import micronet.backbone.microconfig as microcfg
+# import activation
+# import microconfig as microcfg
 
 import math
 import pdb
@@ -284,6 +285,8 @@ class DYMicroBlock(nn.Module):
         init_ab3 = activation_cfg.INIT_A_BLOCK3
 
         t1 = ch_exp
+        # gs1 = (g1, g2)
+        # gs2 = (c3, g3, g4)
         gs1 = ch_per_group
         hidden_fft, g1, g2 = groups_1x1
 
