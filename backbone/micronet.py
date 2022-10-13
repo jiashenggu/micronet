@@ -1,12 +1,14 @@
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 import torch.nn.functional as F
 
-import micronet.backbone.activation as activation
-import micronet.backbone.microconfig as microcfg
+import backbone.activation as activation
+import backbone.microconfig as microcfg
 # import activation
 # import microconfig as microcfg
+from typing import Optional, Dict, Tuple
 
 import math
 import pdb
@@ -182,6 +184,175 @@ class ChannelShuffle2(nn.Module):
 
         return out
 
+# channel wise attention
+class CA_layer(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(CA_layer, self).__init__()
+        # global average pooling
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(channel, channel//reduction, kernel_size=(1, 1), bias=False),
+            nn.BatchNorm2d(channel//reduction),
+            nn.Hardswish(),
+            nn.Conv2d(channel//reduction, channel, kernel_size=(1, 1), bias=False),
+            nn.BatchNorm2d(channel),
+            nn.Hardsigmoid()
+        )
+
+    def forward(self, x):
+        y = self.fc(self.gap(x))
+        return x*y.expand_as(x)
+# global circular conv based pure ConvNet Meta-Former block
+# channel wise attention is used
+class gcc_ca_mf_block(nn.Module):
+    def __init__(self,
+                 dim: int,
+                 meta_kernel_size: int,
+                 instance_kernel_method='crop',
+                 use_pe:Optional[bool]=True,
+                 mid_mix: Optional[bool]=True,
+                 bias: Optional[bool]=True,
+                 ffn_dim: Optional[int]=2,
+                 ffn_dropout=0.0,
+                 dropout=0.1):
+
+        super(gcc_ca_mf_block, self).__init__()
+
+        # spatial part,
+        self.pre_Norm_1 = nn.BatchNorm2d(num_features=dim)
+        self.pre_Norm_2 = nn.BatchNorm2d(num_features=dim)
+
+        self.meta_kernel_1_H = nn.Conv2d(dim, dim, (meta_kernel_size, 1), groups=dim).weight
+        self.meta_kernel_1_W = nn.Conv2d(dim, dim, (1, meta_kernel_size), groups=dim).weight
+        self.meta_kernel_2_H = nn.Conv2d(dim, dim, (meta_kernel_size, 1), groups=dim).weight
+        self.meta_kernel_2_W = nn.Conv2d(dim, dim, (1, meta_kernel_size), groups=dim).weight
+
+        if bias:
+            self.meta_1_H_bias = nn.Parameter(torch.randn(dim))
+            self.meta_1_W_bias = nn.Parameter(torch.randn(dim))
+            self.meta_2_H_bias = nn.Parameter(torch.randn(dim))
+            self.meta_2_W_bias = nn.Parameter(torch.randn(dim))
+        else:
+            self.meta_1_H_bias = None
+            self.meta_1_W_bias = None
+            self.meta_2_H_bias = None
+            self.meta_2_W_bias = None
+
+        self.instance_kernel_method = instance_kernel_method
+
+        if use_pe:
+            self.meta_pe_1_H = nn.Parameter(torch.randn(1, dim, meta_kernel_size, 1))
+            self.meta_pe_1_W = nn.Parameter(torch.randn(1, dim, 1, meta_kernel_size))
+            self.meta_pe_2_H = nn.Parameter(torch.randn(1, dim, meta_kernel_size, 1))
+            self.meta_pe_2_W = nn.Parameter(torch.randn(1, dim, 1, meta_kernel_size))
+
+
+        if mid_mix:
+            self.mixer = nn.ChannelShuffle(groups=2)
+
+        self.mid_mix = mid_mix
+        self.use_pe = use_pe
+        self.dim = dim
+
+        # channel part
+        # self.ffn = nn.Sequential(
+        #     nn.BatchNorm2d(num_features=2*dim),
+        #     nn.Conv2d(2*dim, ffn_dim, kernel_size=(1, 1), bias=True),
+        #     nn.Hardswish(),
+        #     nn.Dropout(p=ffn_dropout),
+        #     nn.Conv2d(ffn_dim, 2*dim, kernel_size=(1, 1), bias=True),
+        #     nn.Dropout(p=dropout)
+        # )
+
+        # self.ca = CA_layer(channel=2*dim)
+
+    def get_instance_kernel(self, instance_kernel_size):
+        if self.instance_kernel_method == 'crop':
+            return self.meta_kernel_1_H[:, :, : instance_kernel_size,:], \
+                   self.meta_kernel_1_W[:, :, :, :instance_kernel_size], \
+                   self.meta_kernel_2_H[:, :, :instance_kernel_size, :], \
+                   self.meta_kernel_2_W[:, :, :, :instance_kernel_size]
+
+        elif self.instance_kernel_method == 'interpolation_bilinear':
+            H_shape = [instance_kernel_size, 1]
+            W_shape = [1, instance_kernel_size]
+            return F.interpolate(self.meta_kernel_1_H, H_shape, mode='bilinear', align_corners=True), \
+                   F.interpolate(self.meta_kernel_1_W, W_shape, mode='bilinear', align_corners=True), \
+                   F.interpolate(self.meta_kernel_2_H, H_shape, mode='bilinear', align_corners=True), \
+                   F.interpolate(self.meta_kernel_2_W, W_shape, mode='bilinear', align_corners=True),
+
+        else:
+            print('{} is not supported!'.format(self.instance_kernel_method))
+
+    def get_instance_pe(self, instance_kernel_size):
+        if self.instance_kernel_method == 'crop':
+            return self.meta_pe_1_H[:, :, :instance_kernel_size, :]\
+                       .expand(1, self.dim, instance_kernel_size, instance_kernel_size), \
+                   self.meta_pe_1_W[:, :, :, :instance_kernel_size]\
+                       .expand(1, self.dim, instance_kernel_size, instance_kernel_size), \
+                   self.meta_pe_2_H[:, :, :instance_kernel_size, :]\
+                       .expand(1, self.dim, instance_kernel_size, instance_kernel_size), \
+                   self.meta_pe_2_W[:, :, :, :instance_kernel_size]\
+                       .expand(1, self.dim, instance_kernel_size, instance_kernel_size)
+
+        elif self.instance_kernel_method == 'interpolation_bilinear':
+            return F.interpolate(self.meta_pe_1_H, [instance_kernel_size, 1], mode='bilinear', align_corners=True)\
+                       .expand(1, self.dim, instance_kernel_size, instance_kernel_size), \
+                   F.interpolate(self.meta_pe_1_W, [1, instance_kernel_size], mode='bilinear', align_corners=True)\
+                       .expand(1, self.dim, instance_kernel_size, instance_kernel_size), \
+                   F.interpolate(self.meta_pe_2_H, [instance_kernel_size, 1], mode='bilinear', align_corners=True)\
+                       .expand(1, self.dim, instance_kernel_size, instance_kernel_size), \
+                   F.interpolate(self.meta_pe_2_W, [1, instance_kernel_size], mode='bilinear', align_corners=True)\
+                       .expand(1, self.dim, instance_kernel_size, instance_kernel_size)
+        else:
+            print('{} is not supported!'.format(self.instance_kernel_method))
+
+    def forward(self, x: Tensor) -> Tensor:
+
+        x_1, x_2 = torch.chunk(x, 2, 1)
+        x_1_res, x_2_res = x_1, x_2
+        _, _, f_s, _ = x_1.shape
+
+        K_1_H, K_1_W, K_2_H, K_2_W = self.get_instance_kernel(f_s)
+
+        if self.use_pe:
+            pe_1_H, pe_1_W, pe_2_H, pe_2_W = self.get_instance_pe(f_s)
+
+        # **************************************************************************************************sptial part
+        # pre norm
+        if self.use_pe:
+            x_1, x_2 = x_1 + pe_1_H, x_2 + pe_1_W
+
+        x_1, x_2 = self.pre_Norm_1(x_1), self.pre_Norm_2(x_2)
+
+        # stage 1
+        x_1_1 = F.conv2d(torch.cat((x_1, x_1[:, :, :-1, :]), dim=2), weight=K_1_H, bias=self.meta_1_H_bias, padding=0,
+                         groups=self.dim)
+        x_2_1 = F.conv2d(torch.cat((x_2, x_2[:, :, :, :-1]), dim=3), weight=K_1_W, bias=self.meta_1_W_bias, padding=0,
+                         groups=self.dim)
+        if self.mid_mix:
+            mid_rep = torch.cat((x_1_1, x_2_1), dim=1)
+            x_1_1, x_2_1 = torch.chunk(self.mixer(mid_rep), chunks=2, dim=1)
+
+        if self.use_pe:
+            x_1_1, x_2_1 = x_1_1 + pe_2_W, x_2_1 + pe_2_H
+
+        # stage 2
+        x_1_2 = F.conv2d(torch.cat((x_1_1, x_1_1[:, :, :, :-1]), dim=3), weight=K_2_W, bias=self.meta_2_W_bias,
+                         padding=0, groups=self.dim)
+        x_2_2 = F.conv2d(torch.cat((x_2_1, x_2_1[:, :, :-1, :]), dim=2), weight=K_2_H, bias=self.meta_2_H_bias,
+                         padding=0, groups=self.dim)
+
+        # residual
+        x_1 = x_1_res + x_1_2
+        x_2 = x_2_res + x_2_2
+
+        # *************************************************************************************************channel part
+        x_ffn = torch.cat((x_1, x_2), dim=1)
+        # x_ffn = x_ffn + self.ca(self.ffn(x_ffn))
+
+        return x_ffn
+
 ######################################################################3
 # part 3: new block
 #####################################################################3
@@ -292,7 +463,8 @@ class DYMicroBlock(nn.Module):
 
         hidden_dim1 = inp * t1[0]
         hidden_dim2 = inp * t1[0] * t1[1]
-
+        if self.identity:
+            self.ca = CA_layer(channel=oup)
         if gs1[0] == 0:
             self.layers = nn.Sequential(
                 DepthSpatialSepConv(inp, t1, kernel_size, stride),
@@ -364,8 +536,11 @@ class DYMicroBlock(nn.Module):
                     expansion = False
                 ) if y1 > 0 else nn.ReLU6(inplace=True),
                 ChannelShuffle(gs1[1]) if shuffle else nn.Sequential(),
-                DepthSpatialSepConv(hidden_dim2, (1, 1), kernel_size, stride) if depthsep else
-                DepthConv(hidden_dim2, hidden_dim2, kernel_size, stride),
+                # DepthSpatialSepConv(hidden_dim2, (1, 1), kernel_size, stride) if depthsep else
+                # DepthConv(hidden_dim2, hidden_dim2, kernel_size, stride),
+                DepthSpatialSepConv(hidden_dim2, (1, 1), kernel_size, stride) if stride!=1
+                else gcc_ca_mf_block(hidden_dim2//2, kernel_size, "interpolation_bilinear", use_pe=True, mid_mix=False, bias=None, ffn_dim=hidden_dim2, ffn_dropout=0.0, dropout=0.1),
+
                 nn.Sequential(),
                 activation.get_act_layer(
                     hidden_dim2,
@@ -402,8 +577,9 @@ class DYMicroBlock(nn.Module):
     def forward(self, x):
         identity = x
         out = self.layers(x)
-
+        
         if self.identity:
+            out = self.ca(out)
             out = out + identity
 
         return out

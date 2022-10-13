@@ -6,6 +6,7 @@ from .visualize import *
 from .eval import *
 from .defaults import _C as cfg
 from .m0 import _C as cfg_m0
+from .m2 import _C as cfg_m2
 from .larc import *
 # progress bar
 import os, sys

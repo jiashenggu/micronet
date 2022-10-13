@@ -138,7 +138,14 @@ def main():
 
     # create model
     print("=> creating model '{}'".format(args.arch))
+    import ipdb
+    ipdb.set_trace()
+    from thop import profile
     model = eval(args.arch)(cfg)
+    input = torch.randn(1, 3, 224, 224)
+    macs, params, layer_info = profile(model, inputs=(input, ), ret_layer_info=True)
+
+    
 
     if not args.distributed:
         if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):

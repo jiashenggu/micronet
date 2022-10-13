@@ -16,7 +16,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python main.py --arch MicroNet -d $DATA_PATH --epoc
                                                          MODEL.ACTIVATION.MODULE DYShiftMax \
                                                          MODEL.ACTIVATION.ACT_MAX 2.0 \
                                                          MODEL.ACTIVATION.LINEARSE_BIAS False \
-							 MODEL.ACTIVATION.INIT_A_BLOCK3 1.0,0.0 \
+							                             MODEL.ACTIVATION.INIT_A_BLOCK3 1.0,0.0 \
                                                          MODEL.ACTIVATION.INIT_A 1.0,0.5 \
                                                          MODEL.ACTIVATION.INIT_B 0.0,0.5 \
                                                          MODEL.ACTIVATION.REDUCTION 8 \

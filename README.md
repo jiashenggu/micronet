@@ -47,4 +47,7 @@ Yes, it is a plug-and-play model. You have multiple choices to implement. Rememb
 
 You need to use both with order L381-L395 (P\Phi)+ L349-L363 (Q)
 
-s, n, c, ks represents the stride, number of repeated layers, network width and kernel sizes. The multiplication of c1 and c2 is the expansion between input channels to the hidden dimension. g1 and g2, g3 and g4 are basically the same parameters that represent the group number used in the macro-factorized convolution. The rest three parameters are used to decide whether the dynamic shift-max is used or not, while the last parameter is the hyperparameter contained in dynamic shift-max to adjust the reduction ratio.
+s, n, c, ks represents the stride, number of repeated layers, network width and kernel sizes. 
+The multiplication of c1 and c2 is the expansion between input channels to the hidden dimension. 
+g1 and g2, g3 and g4 are basically the same parameters that represent the group number used in the macro-factorized convolution. 
+The rest three parameters are used to decide whether the dynamic shift-max is used or not, while the last parameter is the hyperparameter contained in dynamic shift-max to adjust the reduction ratio.
